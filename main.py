@@ -1,29 +1,44 @@
 import os
 import threading
 import json
+import base64
+import re
 import requests
 import telebot
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, storage
+from openai import OpenAI
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==========================================
-# 1. FIREBASE ADMIN CONFIGURATION
+# 1. FIREBASE ADMIN CONFIGURATION (FIXED)
 # ==========================================
 def init_firebase():
     if not firebase_admin._apps:
         cred_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+        bucket_url = os.environ.get("FIREBASE_BUCKET_URL")
+        
         if cred_json:
             # Parse raw credentials json string from environment
             cred_dict = json.loads(cred_json)
             cred = credentials.Certificate(cred_dict)
-        else:
-            # Fallback to local credentials for desktop debugging
+        elif os.path.exists("serviceAccountKey.json"):
+            # Matches the Render Secret File naming convention perfectly
+            cred = credentials.Certificate("serviceAccountKey.json")
+        elif os.path.exists("firebase_key.json"):
+            # Fallback for old local naming setups
             cred = credentials.Certificate("firebase_key.json")
-        firebase_admin.initialize_app(cred)
+        else:
+            raise FileNotFoundError("❌ CRITICAL: No Firebase credentials file found! Check Render Secret Files.")
+            
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': bucket_url
+        })
     return firestore.client()
 
 db = init_firebase()
+bucket = storage.bucket()
 
 # ==========================================
 # 2. TELEGRAM BOT & API TOKENS CONFIGURATION
@@ -33,15 +48,18 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required.")
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY environment variable is required.")
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode="HTML")
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 # ==========================================
 # 3. BACKGROUND HEALTH CHECK SERVER (PORT 8080)
 # ==========================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/health" or self.path == "/":
+        if self.path in ["/health", "/"]:
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -61,219 +79,192 @@ health_thread = threading.Thread(target=run_health_server, daemon=True)
 health_thread.start()
 
 # ==========================================
-# 4. ELITE GOALS ENGINE SYSTEM PROMPT
+# 4. ELITE GOALS ENGINE SYSTEM PROMPTS
 # ==========================================
 ELITE_GOALS_ENGINE_PROMPT = """SYSTEM MODE: ⚡ ELITE GOALS ENGINE V15 (SINGLE-LAST-MATCH ULTRA PRECISION)
-
 INPUT TYPE: Screenshot (Fixtures + League Table + ONLY 1 Last Match per team)
-
-━━━━━━━━━━━━━━━━━━━
 
 🎯 CORE OBJECTIVE:
 Select ONLY ONE ULTRA ELITE MATCH with highest probability of:
-- BTTS (Both Teams To Score)
-AND
-- Over 2.5 or Over 3.5 Goals
-
-━━━━━━━━━━━━━━━━━━━
+- BTTS (Both Teams To Score) AND Over 2.5 or Over 3.5 Goals
 
 🔍 STEP 1 — STRICT LEAGUE FILTER (HARD RULE)
-
 ONLY consider matches where:
 - Teams are within EXACTLY 2 league positions
 - Points difference ≤ 5
-
 If NO match qualifies → OUTPUT: NO PICK
 
-━━━━━━━━━━━━━━━━━━━
-
 📊 STEP 2 — SINGLE LAST MATCH ANALYSIS (CRITICAL LOGIC)
-
 For EACH team, analyze ONLY ONE most recent match:
-
-Evaluate:
-
-1. SCORING SIGNAL
-- Did team score? (YES = strong BTTS support)
-- Did team concede? (YES = BTTS boost)
-
-2. MATCH INTENSITY
-- Total goals in last match:
-  - 0–1 = weak
-  - 2–3 = medium
-  - 4+ = strong over signal
-
-3. BALANCE INDICATOR
-- If both teams scored → HIGH BTTS probability
-- If both conceded → HIGH over probability
-
-━━━━━━━━━━━━━━━━━━━
+1. SCORING SIGNAL: Did team score? (YES = strong BTTS support), Did team concede? (YES = BTTS boost)
+2. MATCH INTENSITY: Total goals in last match (0–1 = weak, 2–3 = medium, 4+ = strong over signal)
+3. BALANCE INDICATOR: If both teams scored → HIGH BTTS probability, If both conceded → HIGH over probability
 
 ⚖️ STEP 3 — COMBINED MATCH ENGINE
-
-For the fixture:
-
 - Both teams must have scored in last match → BTTS STRONG
 - At least one team conceded → OVER SUPPORT
 - Combined last-match goals ≥ 3 → OVER 2.5 VALID
 - Combined last-match goals ≥ 4 → OVER 3.5 CONSIDERED
 
-━━━━━━━━━━━━━━━━━━━
-
 🚨 STEP 4 — TRAP FILTER (VERY IMPORTANT)
-
-REJECT MATCH IF:
-- Either team won 1–0 with clean sheet
-- Either team lost 0–1 or 0–0
-- Defensive dominance shown in last match
-- One-sided scoring pattern
-
-━━━━━━━━━━━━━━━━━━━
+REJECT MATCH IF: Either team won 1–0 with clean sheet, Either team lost 0–1 or 0–0, Defensive dominance shown in last match, One-sided scoring pattern
 
 📈 STEP 5 — MARKET DECISION
-
 - If BOTH teams scored + conceded → BTTS + Over 2.5
 - If last match total goals ≥ 4 → upgrade to Over 3.5
 - Otherwise → reject match
 
-━━━━━━━━━━━━━━━━━━━
-
 🏆 FINAL SELECTION RULE
-
-Choose ONLY ONE MATCH with:
-- Strongest single-match attacking signals
-- Mutual scoring involvement
-- Highest combined goal intensity
-- No defensive dominance
-
-━━━━━━━━━━━━━━━━━━━
+Choose ONLY ONE MATCH with strongest single-match attacking signals, mutual scoring involvement, highest combined goal intensity, no defensive dominance.
 
 📤 OUTPUT FORMAT (STRICT — NO EXPLANATION)
-
 🔥 ULTRA ELITE GOALS PICK 🔥
-
 Match: [Team A vs Team B]  
 Market: [BTTS + Over 2.5 / Over 3.5]  
 Confidence: [95–100%]"""
 
-# ==========================================
-# 5. OPENROUTER VISION INTERMEDIARY
-# ==========================================
-def analyze_image_via_openrouter(image_url):
-    """
-    Calls OpenRouter Vision Model (e.g., google/gemini-2.5-flash) to evaluate betting statistics screenshots.
-    """
-    if not OPENROUTER_API_KEY:
-        return "⚠️ Error: OPENROUTER_API_KEY environment variable is not configured."
+RESULT_PROMPT = """SYSTEM MODE: ⚡ RESULT EXTRACTION ENGINE V1.0
+Analyze the provided screenshot showing completed football match results. Extract match names and final scores.
+OUTPUT FORMAT (STRICT): Return ONLY plain text list of matches and scores, one per line. No introduction.
+Example:
+Team A 2-1 Team B
+Team C 0-0 Team D"""
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": "google/gemini-2.5-flash",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": ELITE_GOALS_ENGINE_PROMPT},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": image_url
-                        }
-                    }
-                ]
-            }
-        ]
-    }
+# ==========================================
+# 5. CORE UTILITY ENGINE FUNCTIONS
+# ==========================================
+def encode_image(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
 
+def call_vision_ai(image_path, prompt_text):
+    base64_image = encode_image(image_path)
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-        response.raise_for_status()
-        result_json = response.json()
-        return result_json["choices"][0]["message"]["content"]
+        response = client.chat.completions.create(
+            model="openai/gpt-4o",
+            messages=[
+                {"role": "system", "content": prompt_text},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Analyze this screenshot image strictly based on your engine instructions."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                ]}
+            ],
+            temperature=0.1
+        )
+        return response.choices[0].message.content
     except Exception as e:
-        return f"⚠️ Vision analysis failed: {str(e)}"
+        print(f"❌ Vision API Error: {e}")
+        return "ERROR"
 
-# ==========================================
-# 6. TELEGRAM IMAGE HANDLER ROUTINES
-# ==========================================
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
+def parse_prediction(raw_text):
     try:
-        chat_id = message.chat.id
-        caption = message.caption.strip() if message.caption else ""
+        match_line = re.search(r"Match:\s*(.+)\s*vs\s*(.+)", raw_text)
+        if match_line:
+            return {
+                "team_a": match_line.group(1).strip(),
+                "team_b": match_line.group(2).strip(),
+                "btts": "YES",
+                "over25": True if "Over 2.5" in raw_text else False,
+                "over35": True if "Over 3.5" in raw_text else False
+            }
+    except Exception:
+        return None
 
-        # Send initial loading status
-        status_msg = bot.reply_to(message, "⏳ Connecting with elite analyzer. Fetching high-compression image assets...")
+def evaluate_bet(pred_data, scores_text):
+    team_a, team_b = pred_data["team_a"], pred_data["team_b"]
+    pattern = rf"({re.escape(team_a)}|{re.escape(team_b)})\s*(\d+)\s*-\s*(\d+)\s*({re.escape(team_a)}|{re.escape(team_b)})"
+    match = re.search(pattern, scores_text, re.IGNORECASE)
+    
+    if not match:
+        return "NOT_FOUND", None
 
-        # Retrieve photo URL from Telegram assets
+    first_team, s1, s2 = match.group(1), int(match.group(2)), int(match.group(3))
+    score_a, score_b = (s1, s2) if first_team.lower() == team_a.lower() else (s2, s1)
+    
+    total = score_a + score_b
+    actual_btts = "YES" if (score_a > 0 and score_b > 0) else "NO"
+    
+    btts_win = (pred_data["btts"] == actual_btts)
+    o25_win = (total > 2) if pred_data["over25"] else True
+    o35_win = (total > 3) if pred_data["over35"] else True
+    
+    score_str = f"{team_a} {score_a}-{score_b} {team_b}"
+    return ("WON", score_str) if (btts_win and o25_win and o35_win) else ("LOST", score_str)
+
+# ==========================================
+# 6. TELEGRAM BOT EVENT HANDLERS
+# ==========================================
+@bot.message_handler(commands=['start'])
+def start(message):
+    welcome_text = (
+        "📸 <b>PRO Goals Detector Active!</b>\n\n"
+        "• Send league fixture photos to get <b>V15 Predictions</b>.\n"
+        "• Send results photos with the caption <code>/result</code> to auto-update statistics."
+    )
+    bot.reply_to(message, welcome_text, parse_mode="HTML")
+
+@bot.message_handler(content_types=['photo'])
+def handle_incoming_photo(message):
+    local_path = f"temp_{message.chat.id}.jpg"
+    
+    try:
         file_info = bot.get_file(message.photo[-1].file_id)
-        image_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info.file_path}"
+        img_data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info.file_path}").content
+        with open(local_path, "wb") as f:
+            f.write(img_data)
 
-        # Route check for standard upload vs update trigger
-        if caption.startswith("/result") or caption.startswith("/update"):
-            bot.edit_message_text("🔄 Initiating automatic database score verification system...", chat_id, status_msg.message_id)
+        # WORKFLOW A: PROCESS RECENT OUTCOMES UPDATER
+        if message.caption and message.caption.strip().lower() in ['/result', '/update']:
+            bot.reply_to(message, "🔢 Processing results image... Updating archive history.")
+            scores_text = call_vision_ai(local_path, RESULT_PROMPT)
             
-            # Find and update pending fixtures in Firestore
-            bets_ref = db.collection("bets").where("user_id", "==", chat_id).where("resolved", "==", False).limit(5).get()
-            
-            if not bets_ref:
-                bot.edit_message_text("❌ No active pending bets found in your ledger records to resolve.", chat_id, status_msg.message_id)
+            if not scores_text or "ERROR" in scores_text:
+                bot.reply_to(message, "❌ Failed to read scores cleanly from image structural contents.")
                 return
 
-            resolved_count = 0
-            for doc in bets_ref:
-                db.collection("bets").document(doc.id).update({
-                    "resolved": True,
-                    "result": "WON", 
-                    "resolved_at": firestore.SERVER_TIMESTAMP
+            pending_docs = db.collection("predictions").where("status", "==", "PENDING").stream()
+            updated_count = 0
+            
+            for doc in pending_docs:
+                pred_data = parse_prediction(doc.to_dict().get("raw_prediction", ""))
+                if pred_data:
+                    status, score_str = evaluate_bet(pred_data, scores_text)
+                    if status != "NOT_FOUND":
+                        db.collection("predictions").document(doc.id).update({
+                            "status": status, "actual_outcome": score_str
+                        })
+                        updated_count += 1
+            
+            bot.reply_to(message, f"🏁 Done! Verified and updated ({updated_count}) pending bets inside Firestore.")
+
+        # WORKFLOW B: STANDARD MATCH ENGINE PREDICTION
+        else:
+            bot.reply_to(message, "🧠 Running V15 Elite Goals Engine...")
+            prediction_result = call_vision_ai(local_path, ELITE_GOALS_ENGINE_PROMPT)
+            bot.reply_to(message, prediction_result)
+
+            if "NO PICK" not in prediction_result and "ERROR" not in prediction_result:
+                unique_id = f"{message.chat.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                blob = bucket.blob(f"screenshots/{unique_id}.jpg")
+                blob.upload_from_filename(local_path)
+                blob.make_public()
+                
+                db.collection("predictions").document(unique_id).set({
+                    "chat_id": message.chat.id,
+                    "timestamp": datetime.utcnow(),
+                    "raw_prediction": prediction_result,
+                    "image_url": blob.public_url,
+                    "status": "PENDING",
+                    "actual_outcome": None
                 })
-                resolved_count += 1
-
-            bot.edit_message_text(f"✅ Auto-verified stats screenshot. {resolved_count} pending positions adjusted to WON and settled in your ledger.", chat_id, status_msg.message_id)
-            return
-
-        # Regular analysis sequence
-        bot.edit_message_text("🧠 Synthesizing screenshot with **ELITE GOALS ENGINE V15** standard rules...", chat_id, status_msg.message_id)
-        
-        # Analyze using OpenRouter Vision
-        analysis_result = analyze_image_via_openrouter(image_url)
-
-        # Log pending transaction state into firebase DB
-        bet_doc_ref = db.collection("bets").document()
-        bet_doc_ref.set({
-            "bet_id": bet_doc_ref.id,
-            "user_id": chat_id,
-            "market": "BTTS + Over 2.5/3.5",
-            "stake": 100.0,
-            "raw_analysis": analysis_result,
-            "resolved": False,
-            "result": "PENDING",
-            "created_at": firestore.SERVER_TIMESTAMP
-        })
-
-        output_text = f"{analysis_result}\n\n💾 <i>Bet recommendation saved to Firestore with status <b>PENDING</b>.</i>"
-        bot.edit_message_text(output_text, chat_id, status_msg.message_id, parse_mode="HTML")
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Error executing photo analysis: {str(e)}")
+        print(f"Server operational pipeline error: {e}")
+        bot.reply_to(message, "❌ High-load image structural processing error.")
+    finally:
+        if os.path.exists(local_path):
+            os.remove(local_path)
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    help_text = (
-        "👋 <b>Welcome to the Elite Telegram Betting Bot Companion!</b>\n\n"
-        "⚽ Upload league screenshot containing fixtures & tables to run the <b>ELITE GOALS ENGINE V15</b> model.\n"
-        "📊 Standard photo uploads are saved automatically as <b>PENDING</b> bets in Firestore.\n\n"
-        "🔄 Add the caption <b>/result</b> or <b>/update</b> to your picture upload to run the scoreboard resolution system."
-    )
-    bot.reply_to(message, help_text, parse_mode="HTML")
-
-# ==========================================
-# 7. MAIN ENTRY BOOTSTRAP
-# ==========================================
 if __name__ == "__main__":
-    print("Telegram Bot listener started successfully...")
+    print("🚀 Bot process listening to Telegram Polling infrastructure...")
     bot.infinity_polling()
