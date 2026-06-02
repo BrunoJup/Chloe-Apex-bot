@@ -3,6 +3,7 @@ import threading
 import json
 import base64
 import re
+import time
 import requests
 import telebot
 import firebase_admin
@@ -12,7 +13,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==========================================
-# 1. FIREBASE ADMIN CONFIGURATION (FIXED)
+# 1. FIREBASE ADMIN CONFIGURATION
 # ==========================================
 def init_firebase():
     if not firebase_admin._apps:
@@ -20,14 +21,11 @@ def init_firebase():
         bucket_url = os.environ.get("FIREBASE_BUCKET_URL")
         
         if cred_json:
-            # Parse raw credentials json string from environment
             cred_dict = json.loads(cred_json)
             cred = credentials.Certificate(cred_dict)
         elif os.path.exists("serviceAccountKey.json"):
-            # Matches the Render Secret File naming convention perfectly
             cred = credentials.Certificate("serviceAccountKey.json")
         elif os.path.exists("firebase_key.json"):
-            # Fallback for old local naming setups
             cred = credentials.Certificate("firebase_key.json")
         else:
             raise FileNotFoundError("❌ CRITICAL: No Firebase credentials file found! Check Render Secret Files.")
@@ -54,6 +52,10 @@ if not OPENROUTER_API_KEY:
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode="HTML")
 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
+# Album / Media Group Global Buffers
+media_groups = {}
+media_locks = {}
+
 # ==========================================
 # 3. BACKGROUND HEALTH CHECK SERVER (PORT 8080)
 # ==========================================
@@ -68,13 +70,21 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_HEAD(self):
+        if self.path in ["/health", "/"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     print(f"Health check server running on port {port}...")
     server.serve_forever()
 
-# Start the health check server in a background thread to prevent Render container timeouts
 health_thread = threading.Thread(target=run_health_server, daemon=True)
 health_thread.start()
 
@@ -82,7 +92,7 @@ health_thread.start()
 # 4. ELITE GOALS ENGINE SYSTEM PROMPTS
 # ==========================================
 ELITE_GOALS_ENGINE_PROMPT = """SYSTEM MODE: ⚡ ELITE GOALS ENGINE V15 (SINGLE-LAST-MATCH ULTRA PRECISION)
-INPUT TYPE: Screenshot (Fixtures + League Table + ONLY 1 Last Match per team)
+INPUT TYPE: Screenshots (Fixtures + League Table + ONLY 1 Last Match per team)
 
 🎯 CORE OBJECTIVE:
 Select ONLY ONE ULTRA ELITE MATCH with highest probability of:
@@ -124,7 +134,7 @@ Market: [BTTS + Over 2.5 / Over 3.5]
 Confidence: [95–100%]"""
 
 RESULT_PROMPT = """SYSTEM MODE: ⚡ RESULT EXTRACTION ENGINE V1.0
-Analyze the provided screenshot showing completed football match results. Extract match names and final scores.
+Analyze the provided screenshots showing completed football match results. Extract match names and final scores.
 OUTPUT FORMAT (STRICT): Return ONLY plain text list of matches and scores, one per line. No introduction.
 Example:
 Team A 2-1 Team B
@@ -137,24 +147,30 @@ def encode_image(path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
-def call_vision_ai(image_path, prompt_text):
-    base64_image = encode_image(image_path)
+def call_vision_ai_multi(image_paths, prompt_text):
+    # Formulate user content array with all collected pictures
+    user_content = [{"type": "text", "text": "Analyze these collected screenshots together structurally based on your engine instructions."}]
+    
+    for path in image_paths:
+        base64_image = encode_image(path)
+        user_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+        })
+
     try:
         response = client.chat.completions.create(
-            model="openai/gpt-4o",
+            model="google/gemini-2.5-flash",  # Switched to production free tier model
             messages=[
                 {"role": "system", "content": prompt_text},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Analyze this screenshot image strictly based on your engine instructions."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]}
+                {"role": "user", "content": user_content}
             ],
             temperature=0.1
         )
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ Vision API Error: {e}")
-        return "ERROR"
+        return f"ERROR: {str(e)}"
 
 def parse_prediction(raw_text):
     try:
@@ -192,34 +208,27 @@ def evaluate_bet(pred_data, scores_text):
     return ("WON", score_str) if (btts_win and o25_win and o35_win) else ("LOST", score_str)
 
 # ==========================================
-# 6. TELEGRAM BOT EVENT HANDLERS
+# 6. BATCH PROCESSING LOGIC FOR ALBUMS
 # ==========================================
-@bot.message_handler(commands=['start'])
-def start(message):
-    welcome_text = (
-        "📸 <b>PRO Goals Detector Active!</b>\n\n"
-        "• Send league fixture photos to get <b>V15 Predictions</b>.\n"
-        "• Send results photos with the caption <code>/result</code> to auto-update statistics."
-    )
-    bot.reply_to(message, welcome_text, parse_mode="HTML")
-
-@bot.message_handler(content_types=['photo'])
-def handle_incoming_photo(message):
-    local_path = f"temp_{message.chat.id}.jpg"
+def process_delayed_group(chat_id, media_group_id, caption):
+    time.sleep(2.0)  # Wait 2 seconds to ensure all parts of the album arrive completely
     
+    with media_locks[media_group_id]:
+        paths = media_groups.get(media_group_id, [])
+        if not paths:
+            return
+        # Clear paths from dictionary memory safely
+        del media_groups[media_group_id]
+        
     try:
-        file_info = bot.get_file(message.photo[-1].file_id)
-        img_data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info.file_path}").content
-        with open(local_path, "wb") as f:
-            f.write(img_data)
-
-        # WORKFLOW A: PROCESS RECENT OUTCOMES UPDATER
-        if message.caption and message.caption.strip().lower() in ['/result', '/update']:
-            bot.reply_to(message, "🔢 Processing results image... Updating archive history.")
-            scores_text = call_vision_ai(local_path, RESULT_PROMPT)
+        is_result_workflow = caption and caption.strip().lower() in ['/result', '/update']
+        
+        if is_result_workflow:
+            bot.send_message(chat_id, f"🔢 Processing ({len(paths)}) screenshots inside album... Updating system history.")
+            scores_text = call_vision_ai_multi(paths, RESULT_PROMPT)
             
             if not scores_text or "ERROR" in scores_text:
-                bot.reply_to(message, "❌ Failed to read scores cleanly from image structural contents.")
+                bot.send_message(chat_id, f"❌ Vision extraction failure:\n<code>{scores_text}</code>")
                 return
 
             pending_docs = db.collection("predictions").where("status", "==", "PENDING").stream()
@@ -235,35 +244,126 @@ def handle_incoming_photo(message):
                         })
                         updated_count += 1
             
-            bot.reply_to(message, f"🏁 Done! Verified and updated ({updated_count}) pending bets inside Firestore.")
-
-        # WORKFLOW B: STANDARD MATCH ENGINE PREDICTION
+            bot.send_message(chat_id, f"🏁 Processing complete! Verified and updated ({updated_count}) matches inside Firestore.")
+            
         else:
-            bot.reply_to(message, "🧠 Running V15 Elite Goals Engine...")
-            prediction_result = call_vision_ai(local_path, ELITE_GOALS_ENGINE_PROMPT)
-            bot.reply_to(message, prediction_result)
+            bot.send_message(chat_id, f"🧠 Image grouping detected ({len(paths)} files). Launching V15 Multi-Image Evaluation...")
+            prediction_result = call_vision_ai_multi(paths, ELITE_GOALS_ENGINE_PROMPT)
+            bot.send_message(chat_id, prediction_result)
 
             if "NO PICK" not in prediction_result and "ERROR" not in prediction_result:
-                unique_id = f"{message.chat.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-                blob = bucket.blob(f"screenshots/{unique_id}.jpg")
-                blob.upload_from_filename(local_path)
+                unique_id = f"{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                
+                # Upload the primary layout picture to Firebase
+                blob = bucket.blob(f"screenshots/{unique_id}_main.jpg")
+                blob.upload_from_filename(paths[0])
                 blob.make_public()
                 
                 db.collection("predictions").document(unique_id).set({
-                    "chat_id": message.chat.id,
+                    "chat_id": chat_id,
                     "timestamp": datetime.utcnow(),
                     "raw_prediction": prediction_result,
                     "image_url": blob.public_url,
                     "status": "PENDING",
                     "actual_outcome": None
                 })
+                
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Engine failure during batch runtime processing:\n<code>{str(e)}</code>")
+    finally:
+        for p in paths:
+            if os.path.exists(p):
+                os.remove(p)
+
+# ==========================================
+# 7. TELEGRAM BOT EVENT HANDLERS
+# ==========================================
+@bot.message_handler(commands=['start'])
+def start(message):
+    welcome_text = (
+        "📸 <b>PRO Goals Detector Active!</b>\n\n"
+        "• Send individual or grouped fixture photos (Albums) for <b>V15 Predictions</b>.\n"
+        "• Send results photos with the caption <code>/result</code> to auto-update statistics."
+    )
+    bot.reply_to(message, welcome_text, parse_mode="HTML")
+
+@bot.message_handler(content_types=['photo'])
+def handle_incoming_photo(message):
+    try:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        img_data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info.file_path}").content
+        
+        # Unique local file assignment
+        local_path = f"img_{message.message_id}_{message.chat.id}.jpg"
+        with open(local_path, "wb") as f:
+            f.write(img_data)
+
+        # Handle Album Grouping
+        if message.media_group_id:
+            mg_id = message.media_group_id
+            if mg_id not in media_locks:
+                media_locks[mg_id] = threading.Lock()
+                media_groups[mg_id] = []
+                
+                # Initialize background thread to wait and process the bundle together
+                t = threading.Thread(target=process_delayed_group, args=(message.chat.id, mg_id, message.caption))
+                t.start()
+                
+            with media_locks[mg_id]:
+                media_groups[mg_id].append(local_path)
+                
+        # Handle Standard Single Image
+        else:
+            is_result = message.caption and message.caption.strip().lower() in ['/result', '/update']
+            paths = [local_path]
+            
+            if is_result:
+                bot.reply_to(message, "🔢 Processing single result image...")
+                scores_text = call_vision_ai_multi(paths, RESULT_PROMPT)
+                
+                if not scores_text or "ERROR" in scores_text:
+                    bot.reply_to(message, f"❌ Vision extraction failure:\n<code>{scores_text}</code>")
+                    return
+
+                pending_docs = db.collection("predictions").where("status", "==", "PENDING").stream()
+                updated_count = 0
+                for doc in pending_docs:
+                    pred_data = parse_prediction(doc.to_dict().get("raw_prediction", ""))
+                    if pred_data:
+                        status, score_str = evaluate_bet(pred_data, scores_text)
+                        if status != "NOT_FOUND":
+                            db.collection("predictions").document(doc.id).update({
+                                "status": status, "actual_outcome": score_str
+                            })
+                            updated_count += 1
+                bot.reply_to(message, f"🏁 Done! Verified and updated ({updated_count}) matches inside Firestore.")
+            else:
+                bot.reply_to(message, "🧠 Running V15 Elite Goals Engine...")
+                prediction_result = call_vision_ai_multi(paths, ELITE_GOALS_ENGINE_PROMPT)
+                bot.reply_to(message, prediction_result)
+
+                if "NO PICK" not in prediction_result and "ERROR" not in prediction_result:
+                    unique_id = f"{message.chat.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                    blob = bucket.blob(f"screenshots/{unique_id}.jpg")
+                    blob.upload_from_filename(local_path)
+                    blob.make_public()
+                    
+                    db.collection("predictions").document(unique_id).set({
+                        "chat_id": message.chat.id,
+                        "timestamp": datetime.utcnow(),
+                        "raw_prediction": prediction_result,
+                        "image_url": blob.public_url,
+                        "status": "PENDING",
+                        "actual_outcome": None
+                    })
+            
+            # Clean up single path image from workspace
+            if os.path.exists(local_path):
+                os.remove(local_path)
 
     except Exception as e:
-        print(f"Server operational pipeline error: {e}")
-        bot.reply_to(message, "❌ High-load image structural processing error.")
-    finally:
-        if os.path.exists(local_path):
-            os.remove(local_path)
+        print(f"System incoming image exception: {e}")
+        bot.reply_to(message, f"❌ Pipeline structural fault: <code>{str(e)}</code>")
 
 if __name__ == "__main__":
     print("🚀 Bot process listening to Telegram Polling infrastructure...")
