@@ -148,7 +148,6 @@ def encode_image(path):
         return base64.b64encode(f.read()).decode("utf-8")
 
 def call_vision_ai_multi(image_paths, prompt_text):
-    # Formulate user content array with all collected pictures
     user_content = [{"type": "text", "text": "Analyze these collected screenshots together structurally based on your engine instructions."}]
     
     for path in image_paths:
@@ -160,12 +159,13 @@ def call_vision_ai_multi(image_paths, prompt_text):
 
     try:
         response = client.chat.completions.create(
-            model="google/gemini-2.5-flash",  # Switched to production free tier model
+            model="google/gemini-2.5-flash",  
             messages=[
                 {"role": "system", "content": prompt_text},
                 {"role": "user", "content": user_content}
             ],
-            temperature=0.1
+            temperature=0.1,
+            max_tokens=1000  # Strict allocation caps request token ceiling for free tier accounts
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -211,13 +211,12 @@ def evaluate_bet(pred_data, scores_text):
 # 6. BATCH PROCESSING LOGIC FOR ALBUMS
 # ==========================================
 def process_delayed_group(chat_id, media_group_id, caption):
-    time.sleep(2.0)  # Wait 2 seconds to ensure all parts of the album arrive completely
+    time.sleep(2.0)  # Safe collection buffering delay
     
     with media_locks[media_group_id]:
         paths = media_groups.get(media_group_id, [])
         if not paths:
             return
-        # Clear paths from dictionary memory safely
         del media_groups[media_group_id]
         
     try:
@@ -254,7 +253,6 @@ def process_delayed_group(chat_id, media_group_id, caption):
             if "NO PICK" not in prediction_result and "ERROR" not in prediction_result:
                 unique_id = f"{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
                 
-                # Upload the primary layout picture to Firebase
                 blob = bucket.blob(f"screenshots/{unique_id}_main.jpg")
                 blob.upload_from_filename(paths[0])
                 blob.make_public()
@@ -293,7 +291,6 @@ def handle_incoming_photo(message):
         file_info = bot.get_file(message.photo[-1].file_id)
         img_data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_info.file_path}").content
         
-        # Unique local file assignment
         local_path = f"img_{message.message_id}_{message.chat.id}.jpg"
         with open(local_path, "wb") as f:
             f.write(img_data)
@@ -305,7 +302,6 @@ def handle_incoming_photo(message):
                 media_locks[mg_id] = threading.Lock()
                 media_groups[mg_id] = []
                 
-                # Initialize background thread to wait and process the bundle together
                 t = threading.Thread(target=process_delayed_group, args=(message.chat.id, mg_id, message.caption))
                 t.start()
                 
@@ -357,7 +353,6 @@ def handle_incoming_photo(message):
                         "actual_outcome": None
                     })
             
-            # Clean up single path image from workspace
             if os.path.exists(local_path):
                 os.remove(local_path)
 
