@@ -123,8 +123,9 @@ RESULT_PROMPT = """SYSTEM MODE: ⚡ RESULT EXTRACTION ENGINE V1.0
 Analyze the images showing completed football match results. Extract match names and final scores.
 OUTPUT FORMAT (STRICT): Return ONLY plain text list of matches and scores, one per line. No introduction.
 Example:
-Team A 2-1 Team B
-Team C 0-0 Team D"""
+WOL 2-2 LEE
+ARS 1-0 CHE
+MUN 3-1 LIV"""
 
 # ==========================================
 # 5. UTILITY & INTELLIGENT MATCHUP LEARNING FUNCTIONS
@@ -159,17 +160,20 @@ def call_vision_ai_multi(image_paths, prompt_text):
 
 def parse_prediction(raw_text):
     try:
-        match_line = re.search(r"Match:\s*(.+)\s*vs\s*(.+)", raw_text)
+        match_line = re.search(r"Match:\s*(.+)\s*vs\s*(.+)", raw_text, re.IGNORECASE)
         if match_line:
+            team_a = match_line.group(1).strip()
+            team_b = match_line.group(2).strip()
             return {
-                "team_a": match_line.group(1).strip(),
-                "team_b": message_line.group(2).strip() if (match_line and len(match_line.groups()) > 1) else "",
-                "raw_match": match_line.group(0).replace("Match:", "").strip(),
+                "team_a": team_a,
+                "team_b": team_b,
+                "raw_match": f"{team_a} vs {team_b}",
                 "btts": "YES",
                 "over25": True if "Over 2.5" in raw_text else False,
                 "over35": True if "Over 3.5" in raw_text else False
             }
-    except Exception:
+    except Exception as e:
+        print(f"Parsing exception: {e}")
         return None
 
 def extract_teams_from_raw_match(raw_match_str):
@@ -179,13 +183,11 @@ def extract_teams_from_raw_match(raw_match_str):
     return None, None
 
 def save_matchup_history_to_learning_layer(scores_text):
-    """Parses and updates structural virtual matchup loop historical behaviors."""
     lines = scores_text.split('\n')
     for line in lines:
-        match = re.search(r"(.+?)\s*(\d+)\s*-\s*(\d+)\s*(.+)", line)
+        match = re.search(r"([A-Za-z0-9_]+)\s*(\d+)\s*-\s*(\d+)\s*([A-Za-z0-9_]+)", line)
         if match:
             t1, s1, s2, t2 = match.group(1).strip(), int(match.group(2)), int(match.group(3)), match.group(4).strip()
-            # Alpha-sorted pair path to create permanent cross-season historical reference IDs
             sorted_teams = sorted([t1.lower(), t2.lower()])
             matchup_id = f"loop_{sorted_teams[0]}_{sorted_teams[1]}"
             
@@ -200,7 +202,6 @@ def save_matchup_history_to_learning_layer(scores_text):
                 historical_scores = data.get("historical_scores", [])
                 historical_scores.append(f"{s1}-{s2}")
                 
-                # Recalculate average profiles
                 total_entries = len(historical_scores)
                 btts_count = sum(1 for s in historical_scores if int(s.split('-')[0]) > 0 and int(s.split('-')[1]) > 0)
                 
@@ -219,24 +220,24 @@ def save_matchup_history_to_learning_layer(scores_text):
                 })
 
 def get_historical_context_string_for_engine():
-    """Compiles the database self-learning history into structural text for the context injector."""
     try:
         history_ref = db.collection("matchup_history").where("avg_goals", ">=", 2.5).limit(20).stream()
         context_lines = []
         for doc in history_ref:
             d = doc.to_dict()
-            context_lines.append(f"Matchup Loop Profile [{d['team_x']} vs {d['team_y']}] -> Avg Goals: {d['avg_goals']:.1f}, BTTS Ratio: {d['btts_probability']*100:%}")
+            context_lines.append(f"Matchup Loop Profile [{d['team_x'].upper()} vs {d['team_y'].upper()}] -> Avg Goals: {d['avg_goals']:.1f}, BTTS Ratio: {d['btts_probability']*100:.1f}%")
         return "\n".join(context_lines) if context_lines else "No historical high-scoring trends indexed yet."
     except Exception:
         return "History read timeout."
 
 def evaluate_and_format_settlement(pred_data, scores_text):
-    raw_match_str = pred_data.get("raw_match", "")
-    team_a, team_b = extract_teams_from_raw_match(raw_match_str)
+    team_a = pred_data.get("team_a")
+    team_b = pred_data.get("team_b")
     
     if not team_a or not team_b:
         return None, None
 
+    # Flexible matching to find either "WOL 2-1 LEE" or "LEE 1-2 WOL" in text logs
     pattern = rf"({re.escape(team_a)}|{re.escape(team_b)})\s*(\d+)\s*-\s*(\d+)\s*({re.escape(team_a)}|{re.escape(team_b)})"
     match = re.search(pattern, scores_text, re.IGNORECASE)
     
@@ -244,32 +245,36 @@ def evaluate_and_format_settlement(pred_data, scores_text):
         return "NOT_FOUND", None
 
     first_team, s1, s2 = match.group(1), int(match.group(2)), int(match.group(3))
-    score_a, score_b = (s1, s2) if first_team.lower() == team_a.lower() else (s2, s1)
+    
+    if first_team.lower() == team_a.lower():
+        score_a, score_b = s1, s2
+    else:
+        score_a, score_b = s2, s1
     
     total = score_a + score_b
     actual_btts = "YES" if (score_a > 0 and score_b > 0) else "NO"
     
-    btts_win = ("YES" == actual_btts)
+    btts_win = (actual_btts == "YES")
     o25_win = (total > 2) if pred_data.get("over25", True) else True
     o35_win = (total > 3) if pred_data.get("over35", False) else True
     
     is_overall_win = btts_win and o25_win and o35_win
     status_str = "WON" if is_overall_win else "LOST"
     
-    # Premium Results Card Visual Generator
-    card_title = "🏆 <b>MATCH RESOLUTION CARD</b>" if is_overall_win else "📉 <b>MATCH RESOLUTION CARD</b>"
-    status_badge = "🟩 <b>[PROFIT — WIN]</b>" if is_overall_win else "🟥 <b>[LOSS — MISSED]</b>"
-    target_market = f"BTTS + Over 2.5" if not pred_data.get("over35") else "BTTS + Over 3.5"
+    # 💎 Premium Cards Construction Layout
+    card_header = "🏆 <b>PREDICTION WINNER CARD</b>" if is_overall_win else "📉 <b>PREDICTION LOSS CARD</b>"
+    status_badge = "🟩 <b>[WON / SUCCESS]</b>" if is_overall_win else "🟥 <b>[LOST / MISSED]</b>"
+    target_market = "BTTS + Over 3.5" if pred_data.get("over35") else "BTTS + Over 2.5"
     
     beautiful_card = (
-        f"{card_title}\n"
-        f"-----------------------------------------\n"
-        f"⚽ <b>Match:</b> {team_a} vs {team_b}\n"
-        f"🏁 <b>Final Score:</b> <code>{score_a} - {score_b}</code> (Total: {total} Goals)\n"
+        f"{card_header}\n"
+        f"<code>-------------------------------------</code>\n"
+        f"⚽ <b>Match:</b> {team_a.upper()} vs {team_b.upper()}\n"
+        f"🏁 <b>Result:</b> <code>{score_a} - {score_b}</code> ({total} goals)\n"
         f"🎯 <b>Target Market:</b> {target_market}\n"
-        f"📊 <b>BTTS Landed:</b> {'✅ Yes' if actual_btts == 'YES' else '❌ No'}\n"
-        f"-----------------------------------------\n"
-        f"✨ <b>Outcome:</b> {status_badge}\n"
+        f"📊 <b>BTTS Landed:</b> {'✅ YES' if actual_btts == 'YES' else '❌ NO'}\n"
+        f"<code>-------------------------------------</code>\n"
+        f"✨ <b>Database Status:</b> {status_badge}\n"
     )
     
     return status_str, beautiful_card
@@ -278,7 +283,7 @@ def evaluate_and_format_settlement(pred_data, scores_text):
 # 6. PIPELINE PROCESSING ENGINE
 # ==========================================
 def process_unified_pipeline_album(chat_id, media_group_id):
-    time.sleep(2.5)  # Safe batch capture sync buffer
+    time.sleep(2.5)  
     
     with media_locks[media_group_id]:
         paths = media_groups.get(media_group_id, [])
@@ -287,35 +292,38 @@ def process_unified_pipeline_album(chat_id, media_group_id):
         del media_groups[media_group_id]
         
     try:
-        bot.send_message(chat_id, f"⚡ <b>Unified Multi-Image Pipeline Activated ({len(paths)} files).</b>\n\nStep 1: Parsing past match outcomes to update self-learning histories...")
+        bot.send_message(chat_id, f"⚡ <b>Unified Pipeline Active ({len(paths)} files).</b>\n\nStep 1: Checking results and updating performance card database...")
         
-        # 1. First Pass: Read Results and update Firestore Statistics
         scores_text = call_vision_ai_multi(paths, RESULT_PROMPT)
+        print(f"Extracted scores list:\n{scores_text}")
         
         if scores_text and "ERROR" not in scores_text:
-            # Train the self-learning virtual historical loop engine
             save_matchup_history_to_learning_layer(scores_text)
             
-            # Settle any active pending historical predictions
             pending_docs = db.collection("predictions").where("status", "==", "PENDING").stream()
             settled_count = 0
             
             for doc in pending_docs:
-                pred_data = parse_prediction(doc.to_dict().get("raw_prediction", ""))
+                doc_data = doc.to_dict()
+                pred_data = parse_prediction(doc_data.get("raw_prediction", ""))
+                
                 if pred_data:
                     status, beautiful_card = evaluate_and_format_settlement(pred_data, scores_text)
                     if status and status != "NOT_FOUND":
                         db.collection("predictions").document(doc.id).update({
-                            "status": status, "actual_outcome": status
+                            "status": status, 
+                            "actual_outcome": status,
+                            "resolved_at": datetime.utcnow()
                         })
                         bot.send_message(chat_id, beautiful_card, parse_mode="HTML")
                         settled_count += 1
                         
-            bot.send_message(chat_id, f"✅ Statistics Synchronized. Loop learning entries updated. ({settled_count}) old tickets settled.")
+            if settled_count == 0:
+                bot.send_message(chat_id, "ℹ️ No pending database matches found matching these completed scores.")
         else:
-            bot.send_message(chat_id, "⚠️ Notice: No readable score text matching patterns identified in this set.")
+            bot.send_message(chat_id, "⚠️ Notice: Could not extract clear score lines from this album step.")
 
-        # 2. Second Pass: Extract historical data and feed into V15 prediction engine
+        # Step 2: Run predictions for upcoming fixtures
         bot.send_message(chat_id, "Step 2: Injecting memory weights. Evaluating new patterns for next season picks...")
         historical_context = get_historical_context_string_for_engine()
         
@@ -324,24 +332,20 @@ def process_unified_pipeline_album(chat_id, media_group_id):
         
         bot.send_message(chat_id, prediction_result)
 
-        # Log new prediction entry if valid pick was established
         if "NO PICK" not in prediction_result and "ERROR" not in prediction_result:
             parsed_data = parse_prediction(prediction_result)
-            unique_id = f"{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-            
-            blob = bucket.blob(f"screenshots/{unique_id}_bundle.jpg")
-            blob.upload_from_filename(paths[0])
-            blob.make_public()
-            
-            db.collection("predictions").document(unique_id).set({
-                "chat_id": chat_id,
-                "timestamp": datetime.utcnow(),
-                "raw_prediction": prediction_result,
-                "raw_match": parsed_data.get("raw_match") if parsed_data else "Unknown Match",
-                "image_url": blob.public_url,
-                "status": "PENDING",
-                "actual_outcome": None
-            })
+            if parsed_data:
+                unique_id = f"{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                
+                db.collection("predictions").document(unique_id).set({
+                    "chat_id": chat_id,
+                    "timestamp": datetime.utcnow(),
+                    "raw_prediction": prediction_result,
+                    "team_a": parsed_data.get("team_a"),
+                    "team_b": parsed_data.get("team_b"),
+                    "status": "PENDING",
+                    "actual_outcome": None
+                })
                 
     except Exception as e:
         bot.send_message(chat_id, f"❌ Pipeline structural runtime exception:\n<code>{str(e)}</code>")
@@ -386,8 +390,6 @@ def handle_incoming_photo(message):
             with media_locks[mg_id]:
                 media_groups[mg_id].append(local_path)
         else:
-            # Handle lone single images seamlessly by casting into unified single image pipelines
-            bot.reply_to(message, "💡 <i>Tip: Send images together as a grouped batch album for best analysis performance. Running isolated scan...</i>")
             mg_id = f"single_run_{message.message_id}"
             media_locks[mg_id] = threading.Lock()
             media_groups[mg_id] = [local_path]
