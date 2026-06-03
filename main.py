@@ -88,30 +88,28 @@ health_thread = threading.Thread(target=run_health_server, daemon=True)
 health_thread.start()
 
 # ==========================================
-# 4. ELITE GOALS ENGINE SYSTEM PROMPTS
+# 4. HYPER-TARGETED V15 PROMPT WITH WEIGHTED MEMORY
 # ==========================================
-ELITE_GOALS_ENGINE_PROMPT = """SYSTEM MODE: ⚡ ELITE GOALS ENGINE V15 (SEASONAL SELF-LEARNING UPGRADE)
+ELITE_GOALS_ENGINE_PROMPT = """SYSTEM MODE: ⚡ ELITE GOALS ENGINE V15 (HYPER-TARGETED MEMORY CALIBRATION)
 INPUT TYPE: Screenshots (Completed Results + New Fixtures + New League Table)
 
 🎯 CORE OBJECTIVE:
 Select ONLY ONE ULTRA ELITE MATCH from the new fixtures with the absolute highest probability of:
 - BTTS (Both Teams To Score) AND Over 2.5 or Over 3.5 Goals
 
-🧠 VIRTUAL FOOTBALL SEASONAL LOOP SELF-LEARNING LOGIC:
-Virtual leagues run in cyclical loops where historical matchup profiles repeat across different seasons. 
-You are supplied with historic trend summaries for matchups. Use them to heavily bias selection:
-- If a matchup historically results in high scoring BTTS patterns across multiple seasons, elevate its priority.
-- If a matchup traditionally shows defensive gridlocks or highly asymmetric clean sheets, filter it out as a TRAP.
+🧠 HYPER-TARGETED MEMORY DECAY & ALGORITHMIC LOOP LOGIC:
+Virtual football engines run on repetitive cyclic matchup profiles across quick seasons. Below your input parameters, you are supplied with real-time extracted data from your database historical memory ledger. 
+Execute this strict weighting system:
 
-🔍 STEP 1 — STRICT LEAGUE FILTER
-ONLY consider new fixtures where:
-- Teams are within EXACTLY 2 league positions
-- Points difference ≤ 5
+🔥 CRITICAL OVERRIDE RULE (THE HYPER-TARGETED EDGE):
+- Look closely at the "INJECTED SYSTEM MEMORY LAYER".
+- If any fixture in the upcoming schedule shows a historical matchup average >= 3.0 goals and a BTTS Ratio >= 75%, AUTOMATICALLY BYPASS standard conservative league filtering.
+- Elevate this match to your absolute priority #1 pick. Lock in the market as BTTS + Over 2.5 (or Over 3.5 if average goals >= 3.8) and flag confidence as 98-100%.
 
-📊 STEP 2 — HISTORIC PROFILE & LAST MATCH CORRELATION
-For qualifying pairs, check their singular last match data and historical scoreline loops:
-1. SCORING TRENDS: Did both teams display mutual scoring and conceding trends?
-2. INTENSITY CLUSTERS: Total combined goals in historical loops ≥ 3 for Over 2.5, and ≥ 4 for Over 3.5 signals.
+📋 STANDARD PIPELINE FILTERING (IF NO HISTORY OVERRIDE APPLIES):
+1. LEAGUE FILTER: Teams must be within EXACTLY 2 league standings positions, and points gap <= 5.
+2. LAST MATCH METRICS: Both teams must have scored and conceded in their immediate previous round match.
+3. TRAP FILTER: Instantly reject any fixture if either team came off a 0-0, 1-0, or 0-1 low-intensity gridlock.
 
 📤 OUTPUT FORMAT (STRICT — NO EXTRA PROSE):
 🔥 ULTRA ELITE GOALS PICK 🔥
@@ -119,8 +117,9 @@ Match: [Team A vs Team B]
 Market: [BTTS + Over 2.5 / Over 3.5]  
 Confidence: [95–100%]"""
 
-RESULT_PROMPT = """SYSTEM MODE: ⚡ RESULT EXTRACTION ENGINE V1.0
-Analyze the images showing completed football match results. Extract match names and final scores.
+RESULT_PROMPT = """SYSTEM MODE: ⚡ RESULT EXTRACTION ENGINE V2.0 (HIGH-RESILIENCE PARSING)
+Examine the provided screenshots of completed football scores. Extract every match name and final score.
+You must return them cleanly formatted, even if text spacing on the screen is tight or compressed.
 OUTPUT FORMAT (STRICT): Return ONLY plain text list of matches and scores, one per line. No introduction.
 Example:
 WOL 2-2 LEE
@@ -128,7 +127,83 @@ ARS 1-0 CHE
 MUN 3-1 LIV"""
 
 # ==========================================
-# 5. UTILITY & INTELLIGENT MATCHUP LEARNING FUNCTIONS
+# 5. BANKROLL & STAKING ENGINE CORE LOGIC
+# ==========================================
+INITIAL_BANKROLL = 100000.0  
+ESTIMATED_MARKET_ODDS = 2.40  
+
+def get_or_init_bankroll():
+    ref = db.collection("investment").document("bankroll_ledger")
+    doc = ref.get()
+    if doc.exists:
+        return doc.to_dict()
+    else:
+        initial_data = {
+            "current_balance": INITIAL_BANKROLL,
+            "total_profit": 0.0,
+            "total_invested": 0.0,
+            "total_bets": 0,
+            "won_bets": 0,
+            "lost_bets": 0,
+            "updated_at": datetime.utcnow()
+        }
+        ref.set(initial_data)
+        return initial_data
+
+def calculate_kelly_stake(confidence_pct, bankroll_bal):
+    p = confidence_pct / 100.0
+    q = 1.0 - p
+    b = ESTIMATED_MARKET_ODDS - 1.0
+    
+    if b <= 0:
+        return 0.0, 0.0
+        
+    img_kelly = (b * p - q) / b
+    safe_f = img_kelly * 0.25  # Defensive Quarter-Kelly setting
+    
+    if safe_f < 0.02:
+        safe_f = 0.02
+    if safe_f > 0.15:
+        safe_f = 0.15
+        
+    suggested_units = round(bankroll_bal * safe_f, 0)
+    return safe_f * 100.0, suggested_units
+
+def update_bankroll_on_settlement(status, absolute_stake_units):
+    ref = db.collection("investment").document("bankroll_ledger")
+    ledger = get_or_init_bankroll()
+    
+    current_bal = ledger["current_balance"]
+    total_profit = ledger["total_profit"]
+    won_count = ledger["won_bets"]
+    lost_count = ledger["lost_bets"]
+    total_invested = ledger["total_invested"] + absolute_stake_units
+    
+    if status == "WON":
+        gross_return = absolute_stake_units * ESTIMATED_MARKET_ODDS
+        net_gain = gross_return - absolute_stake_units
+        current_bal += net_gain
+        total_profit += net_gain
+        won_count += 1
+    else:
+        current_bal -= absolute_stake_units
+        total_profit -= absolute_stake_units
+        lost_count += 1
+        
+    updated_data = {
+        "current_balance": round(current_bal, 2),
+        "total_profit": round(total_profit, 2),
+        "total_invested": round(total_invested, 2),
+        "total_bets": won_count + lost_count,
+        "won_bets": won_count,
+        "lost_bets": lost_count,
+        "updated_at": datetime.utcnow()
+    }
+    ref.update(updated_data)
+    return updated_data
+
+# ==========================================
+# 6. HIGH-RESILIENCE UTILITY FUNCTIONS
 # ==========================================
 def encode_image(path):
     with open(path, "rb") as f:
@@ -161,13 +236,17 @@ def call_vision_ai_multi(image_paths, prompt_text):
 def parse_prediction(raw_text):
     try:
         match_line = re.search(r"Match:\s*(.+)\s*vs\s*(.+)", raw_text, re.IGNORECASE)
+        conf_line = re.search(r"Confidence:\s*(\d+)", raw_text, re.IGNORECASE)
+        
         if match_line:
             team_a = match_line.group(1).strip()
             team_b = match_line.group(2).strip()
+            confidence = int(conf_line.group(1)) if conf_line else 95
             return {
                 "team_a": team_a,
                 "team_b": team_b,
                 "raw_match": f"{team_a} vs {team_b}",
+                "confidence": confidence,
                 "btts": "YES",
                 "over25": True if "Over 2.5" in raw_text else False,
                 "over35": True if "Over 3.5" in raw_text else False
@@ -176,16 +255,12 @@ def parse_prediction(raw_text):
         print(f"Parsing exception: {e}")
         return None
 
-def extract_teams_from_raw_match(raw_match_str):
-    parts = re.split(r'\bvs\b', raw_match_str, flags=re.IGNORECASE)
-    if len(parts) == 2:
-        return parts[0].strip(), parts[1].strip()
-    return None, None
-
 def save_matchup_history_to_learning_layer(scores_text):
+    """Parses and updates structural virtual matchup loops with high space resilience."""
     lines = scores_text.split('\n')
     for line in lines:
-        match = re.search(r"([A-Za-z0-9_]+)\s*(\d+)\s*-\s*(\d+)\s*([A-Za-z0-9_]+)", line)
+        # 🔥 TUNED REGEX: Catches normal separation 'WOL 2 - 2 LEE' AND compressed clumps 'WOL2-2LEE' seamlessly
+        match = re.search(r"([A-Za-z]{2,4})\s*(\d+)\s*[-–:]\s*(\d+)\s*([A-Za-z]{2,4})", line)
         if match:
             t1, s1, s2, t2 = match.group(1).strip(), int(match.group(2)), int(match.group(3)), match.group(4).strip()
             sorted_teams = sorted([t1.lower(), t2.lower()])
@@ -221,7 +296,7 @@ def save_matchup_history_to_learning_layer(scores_text):
 
 def get_historical_context_string_for_engine():
     try:
-        history_ref = db.collection("matchup_history").where("avg_goals", ">=", 2.5).limit(20).stream()
+        history_ref = db.collection("matchup_history").where("avg_goals", ">=", 2.5).limit(25).stream()
         context_lines = []
         for doc in history_ref:
             d = doc.to_dict()
@@ -230,26 +305,23 @@ def get_historical_context_string_for_engine():
     except Exception:
         return "History read timeout."
 
-def evaluate_and_format_settlement(pred_data, scores_text):
+def evaluate_and_format_settlement(pred_data, doc_id, scores_text):
     team_a = pred_data.get("team_a")
     team_b = pred_data.get("team_b")
+    allocated_stake = pred_data.get("allocated_stake_units", 2000.0)
     
     if not team_a or not team_b:
         return None, None
 
-    # Flexible matching to find either "WOL 2-1 LEE" or "LEE 1-2 WOL" in text logs
-    pattern = rf"({re.escape(team_a)}|{re.escape(team_b)})\s*(\d+)\s*-\s*(\d+)\s*({re.escape(team_a)}|{re.escape(team_b)})"
+    # 🔥 TUNED REGEX: Resilient parsing for compressed strings on settlement lookups
+    pattern = rf"({re.escape(team_a)}|{re.escape(team_b)})\s*(\d+)\s*[-–:]\s*(\d+)\s*({re.escape(team_a)}|{re.escape(team_b)})"
     match = re.search(pattern, scores_text, re.IGNORECASE)
     
     if not match:
         return "NOT_FOUND", None
 
     first_team, s1, s2 = match.group(1), int(match.group(2)), int(match.group(3))
-    
-    if first_team.lower() == team_a.lower():
-        score_a, score_b = s1, s2
-    else:
-        score_a, score_b = s2, s1
+    score_a, score_b = (s1, s2) if first_team.lower() == team_a.lower() else (s2, s1)
     
     total = score_a + score_b
     actual_btts = "YES" if (score_a > 0 and score_b > 0) else "NO"
@@ -261,9 +333,11 @@ def evaluate_and_format_settlement(pred_data, scores_text):
     is_overall_win = btts_win and o25_win and o35_win
     status_str = "WON" if is_overall_win else "LOST"
     
-    # 💎 Premium Cards Construction Layout
-    card_header = "🏆 <b>PREDICTION WINNER CARD</b>" if is_overall_win else "📉 <b>PREDICTION LOSS CARD</b>"
-    status_badge = "🟩 <b>[WON / SUCCESS]</b>" if is_overall_win else "🟥 <b>[LOST / MISSED]</b>"
+    updated_ledger = update_bankroll_on_settlement(status_str, allocated_stake)
+    roi = (updated_ledger["total_profit"] / updated_ledger["total_invested"]) * 100 if updated_ledger["total_invested"] > 0 else 0.0
+    
+    card_header = "🏆 <b>PREDICTION WINNER CARD</b>" if status_str == "WON" else "📉 <b>PREDICTION LOSS CARD</b>"
+    status_badge = f"🟩 <b>[WON (+{round(allocated_stake * (ESTIMATED_MARKET_ODDS - 1), 0)} Units)]</b>" if status_str == "WON" else f"🟥 <b>[LOST (-{allocated_stake} Units)]</b>"
     target_market = "BTTS + Over 3.5" if pred_data.get("over35") else "BTTS + Over 2.5"
     
     beautiful_card = (
@@ -273,14 +347,18 @@ def evaluate_and_format_settlement(pred_data, scores_text):
         f"🏁 <b>Result:</b> <code>{score_a} - {score_b}</code> ({total} goals)\n"
         f"🎯 <b>Target Market:</b> {target_market}\n"
         f"📊 <b>BTTS Landed:</b> {'✅ YES' if actual_btts == 'YES' else '❌ NO'}\n"
+        f"💰 <b>Risk Allocated:</b> {allocated_stake} Units\n"
         f"<code>-------------------------------------</code>\n"
-        f"✨ <b>Database Status:</b> {status_badge}\n"
+        f"✨ <b>Outcome:</b> {status_badge}\n"
+        f"誠 <b>Wallet Balance:</b> {updated_ledger['current_balance']} Units\n"
+        f"📈 <b>All-Time ROI:</b> {roi:.2f}%\n"
+        f"📊 <b>Record (W/L):</b> {updated_ledger['won_bets']}W - {updated_ledger['lost_bets']}L"
     )
     
     return status_str, beautiful_card
 
 # ==========================================
-# 6. PIPELINE PROCESSING ENGINE
+# 7. PIPELINE PROCESSING ENGINE
 # ==========================================
 def process_unified_pipeline_album(chat_id, media_group_id):
     time.sleep(2.5)  
@@ -292,10 +370,9 @@ def process_unified_pipeline_album(chat_id, media_group_id):
         del media_groups[media_group_id]
         
     try:
-        bot.send_message(chat_id, f"⚡ <b>Unified Pipeline Active ({len(paths)} files).</b>\n\nStep 1: Checking results and updating performance card database...")
+        bot.send_message(chat_id, f"⚡ <b>Unified Investment Pipeline Active ({len(paths)} files).</b>\n\nStep 1: Auditing past results & balancing ledger entries...")
         
         scores_text = call_vision_ai_multi(paths, RESULT_PROMPT)
-        print(f"Extracted scores list:\n{scores_text}")
         
         if scores_text and "ERROR" not in scores_text:
             save_matchup_history_to_learning_layer(scores_text)
@@ -308,7 +385,8 @@ def process_unified_pipeline_album(chat_id, media_group_id):
                 pred_data = parse_prediction(doc_data.get("raw_prediction", ""))
                 
                 if pred_data:
-                    status, beautiful_card = evaluate_and_format_settlement(pred_data, scores_text)
+                    pred_data["allocated_stake_units"] = doc_data.get("allocated_stake_units", 2000.0)
+                    status, beautiful_card = evaluate_and_format_settlement(pred_data, doc.id, scores_text)
                     if status and status != "NOT_FOUND":
                         db.collection("predictions").document(doc.id).update({
                             "status": status, 
@@ -330,22 +408,37 @@ def process_unified_pipeline_album(chat_id, media_group_id):
         customized_prediction_prompt = f"{ELITE_GOALS_ENGINE_PROMPT}\n\n[INJECTED SYSTEM MEMORY LAYER - HISTORICAL SEASONS HIGHLIGHTS]:\n{historical_context}"
         prediction_result = call_vision_ai_multi(paths, customized_prediction_prompt)
         
-        bot.send_message(chat_id, prediction_result)
-
+        # Step 3: Run Kelly Investment risk pricing modeling if a valid pick is found
         if "NO PICK" not in prediction_result and "ERROR" not in prediction_result:
             parsed_data = parse_prediction(prediction_result)
             if parsed_data:
-                unique_id = f"{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                ledger = get_or_init_bankroll()
+                current_bal = ledger["current_balance"]
                 
+                stake_pct, absolute_units = calculate_kelly_stake(parsed_data["confidence"], current_bal)
+                
+                actionable_card = (
+                    f"{prediction_result}\n\n"
+                    f"⚖️ <b>KELLY INVESTMENT SYSTEM DESIGN:</b>\n"
+                    f"🐳 <b>Suggested Risk Weight:</b> {stake_pct:.2f}% of capital\n"
+                    f"💵 <b>Calculated Investment:</b> <code>{absolute_units} Units</code>"
+                )
+                
+                bot.send_message(chat_id, actionable_card)
+                
+                unique_id = f"{chat_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
                 db.collection("predictions").document(unique_id).set({
                     "chat_id": chat_id,
                     "timestamp": datetime.utcnow(),
                     "raw_prediction": prediction_result,
                     "team_a": parsed_data.get("team_a"),
                     "team_b": parsed_data.get("team_b"),
+                    "allocated_stake_units": absolute_units,
                     "status": "PENDING",
                     "actual_outcome": None
                 })
+        else:
+            bot.send_message(chat_id, prediction_result)
                 
     except Exception as e:
         bot.send_message(chat_id, f"❌ Pipeline structural runtime exception:\n<code>{str(e)}</code>")
@@ -355,18 +448,32 @@ def process_unified_pipeline_album(chat_id, media_group_id):
                 os.remove(p)
 
 # ==========================================
-# 7. TELEGRAM EVENT SUB-CHANNELS
+# 8. TELEGRAM EVENT SUB-CHANNELS
 # ==========================================
 @bot.message_handler(commands=['start'])
 def start(message):
     welcome_text = (
-        "🚀 <b>All-In-One V15 Self-Learning Engine Ready!</b>\n\n"
-        "Simply upload your entire match package screenshots as a single group album:\n"
-        "• <b>Past Results</b> (to close old bets and update loop learning patterns)\n"
-        "• <b>New Fixtures + Current Table</b> (for generation of next ultra precision picks)\n\n"
-        "<i>Everything settles and generates automatically in a single unified message burst!</i>"
+        "🚀 <b>Hyper-Targeted V15 Self-Learning System Active!</b>\n\n"
+        "Send your match package album components together in a single burst. The tuning tweaks handle tight mobile spacing and enforce historical matchup override rules seamlessly!"
     )
     bot.reply_to(message, welcome_text, parse_mode="HTML")
+
+@bot.message_handler(commands=['bankroll'])
+def show_bankroll(message):
+    ledger = get_or_init_bankroll()
+    roi = (ledger["total_profit"] / ledger["total_invested"]) * 100 if ledger["total_invested"] > 0 else 0.0
+    report = (
+        f"📊 <b>LIVE SYSTEM INVESTMENT REPORT</b>\n"
+        f"<code>-------------------------------------</code>\n"
+        f"💳 <b>Current Wallet:</b> {ledger['current_balance']} Units\n"
+        f"💰 <b>Net System Profit:</b> {ledger['total_profit']} Units\n"
+        f"🛡️ <b>Total Volume Traded:</b> {ledger['total_invested']} Units\n"
+        f"📈 <b>Live Yield Performance:</b> {roi:.2f}% ROI\n"
+        f"🎯 <b>Total Slips Evaluated:</b> {ledger['total_bets']} matches\n"
+        f"🟩 <b>Successful Runs:</b> {ledger['won_bets']}\n"
+        f"🟥 <b>Deficit Runs:</b> {ledger['lost_bets']}"
+    )
+    bot.reply_to(message, report, parse_mode="HTML")
 
 @bot.message_handler(content_types=['photo'])
 def handle_incoming_photo(message):
@@ -399,5 +506,5 @@ def handle_incoming_photo(message):
         bot.reply_to(message, f"❌ Ingestion Error: <code>{str(e)}</code>")
 
 if __name__ == "__main__":
-    print("🚀 Unified Infinite Polling Layer Active...")
+    print("🚀 Hyper-Targeted Processing Engine Running...")
     bot.infinity_polling()
